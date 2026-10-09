@@ -1,4 +1,4 @@
--- ==== ScriptDumper v2 (patched)2 ====
+-- ==== ScriptDumper v2 (patched) ====
 -- исправлен хвост: payload теперь проверяет наличие buffer-аргумента
 -- и выдаёт внятную ошибку вместо "readu8 (buffer expected, got nil)".
 -- Оригинал не тронут: 003_loadstring_04df5282_216999.lua
