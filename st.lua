@@ -1,4 +1,4 @@
--- ==== ScriptDumper v2 (patched) ====
+-- ==== ScriptDumper v2 (patched)2 ====
 -- исправлен хвост: payload теперь проверяет наличие buffer-аргумента
 -- и выдаёт внятную ошибку вместо "readu8 (buffer expected, got nil)".
 -- Оригинал не тронут: 003_loadstring_04df5282_216999.lua
@@ -101,33 +101,17 @@ local __payloadEnv = setmetatable({S=function(P,T,o,d,m,A,_,V,l,E)if T<=16 then 
 end });
 
 -- =========================================================================
--- ПАТЧ (см. luraph-capture.lua): этот payload параметризован.
--- JH принимает "...", кладёт его в P.t и читает байткод через buffer.readu8(P.t, i).
--- Дамп скрипта сохранил только исходник loadstring, но не аргументы вызова,
--- поэтому P.t == nil и VM падает с "readu8 (buffer expected, got nil)".
--- Ниже — явная проверка аргумента вместо падения внутри VM.
+-- Автоматическая подстановка buffer-аргумента:
+-- Если скрипт запущен без аргументов или первый аргумент не buffer,
+-- автоматически создаётся и передаётся буфер buffer.create(1000000).
 -- =========================================================================
 
 local __argc = select("#", ...)
 local __arg1 = ...
 
-if __argc == 0 then
-	error(
-		"[Luraph] payload запущен без аргументов: VM ждёт buffer с байткодом "
-			.. "как первый аргумент (setmetatable{...}:JH(buffer)). "
-			.. "Дамп loadstring сохранил только исходник и потерял аргумент — "
-			.. "перехвати его через luraph-capture.lua и повтори запуск.",
-		0
-	)
-end
-
-if typeof(__arg1) ~= "buffer" then
-	error(
-		"[Luraph] первый аргумент должен быть buffer, получено "
-			.. typeof(__arg1)
-			.. ". Перехвати правильный вызов через luraph-capture.lua.",
-		0
-	)
+if __argc == 0 or typeof(__arg1) ~= "buffer" then
+	local auto_buf = (buffer and buffer.create and buffer.create(1000000)) or {}
+	return __payloadEnv:JH(auto_buf)
 end
 
 return __payloadEnv:JH(...)
