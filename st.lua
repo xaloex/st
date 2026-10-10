@@ -1,678 +1,365 @@
 --!nonstrict
 --[[
     =============================================================================
-    pencil-gui.txt — Полный автономный GUI с визуализатором 3D акрилового стекла
-    Извлечено и адаптировано из: puls.orig.lua (PulseAcrGlass)
+    dildo.lua — Полный деобфусцированный модуль "PP" / "PulseWobble" (3D Дилдак)
+    Извлечено из: C:\script-dumps\slient\pensil\puls.orig.lua
     
-    Скрипт полностью самодостаточен:
-      * Встроен движок Pencil (3D Triangle / 4-Wedge Quad / ScreenPointToRay)
-      * Интерактивное перетаскиваемое (Draggable) окно с тёмным стилем
-      * Подложка из физического 3D Glass стекла (настоящий блюр Roblox)
-      * Контроллеры: включение/выключение стекла, настройка прозрачности,
-        выбор цветов преломления, демо 3D треугольников в мире и 2D углов
-      * Кнопка чистого закрытия/выгрузки (Unload)
+    В оригинальном дампе:
+      * PP (строка 9205): Менеджер создания и жизненного цикла ("PP")
+      * t  (строка 1774): Очистка деталей и отключение RunService-соединений
+      * xP (строка 7895): Проверка отрыва от LowerTorso/Torso (> 30 studs)
+      * DP (строка 2042): Фильтр коллизий и рейкастов (префикс "PulseWobble")
+      * cP (строка 542) : Диспетчер косметики персонажа (K.wob -> scale)
+      * getgenv().__pulseWobBuild: Внешний конструктор геометрии (воссоздан до байта)
     =============================================================================
 ]]
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
 
-local LocalPlayer = Players.LocalPlayer
-
--- Защищённое получение контейнера GUI для любых экзекуторов
-local function getGuiParent(): Instance
-    if gethui then
-        return gethui()
-    end
-    local success, core = pcall(function()
-        return CoreGui
-    end)
-    if success and core then
-        return core
-    end
-    return LocalPlayer:WaitForChild("PlayerGui")
-end
-
--- Удаление предыдущей копии при перезапуске
-local GUI_NAME = "PencilAcrylicDemoGUI"
-local oldGui = getGuiParent():FindFirstChild(GUI_NAME)
-if oldGui then
-    oldGui:Destroy()
-end
+local DildoManager = {}
+DildoManager.__index = DildoManager
 
 --=============================================================================
--- 1. ДВИЖОК PENCIL (3D GLASS / ACRYLIC RASTERIZER)
+-- 1. Настройки по умолчанию
 --=============================================================================
 
-local Pencil = {}
-Pencil.__index = Pencil
-
-export type PencilSettings = {
-    enabled: boolean,
-    glassWant: boolean,
-    winOpen: boolean,
-    transparency: number,
-    color: Color3,
-    material: Enum.Material,
-    partName: string,
-    zIndexOffset: number,
-    baseDepth: number,
+export type DildoSettings = {
+    enabled: boolean,          -- Включён ли объект
+    scale: number,             -- Масштаб размера (в дампе a.sc, по дефолту 1.0)
+    color: Color3,             -- Цвет (телесный по умолчанию)
+    tipColor: Color3,          -- Цвет головки
+    material: Enum.Material,   -- Материал (SmoothPlastic / Neon)
+    wobble: boolean,           -- Физика раскачивания при движении
+    wobbleSpeed: number,       -- Скорость покачивания
+    wobbleIntensity: number,   -- Амплитуда покачивания
+    angleOffset: number,       -- Базовый угол наклона в градусах
 }
 
-local defaultSettings: PencilSettings = {
+local defaultSettings: DildoSettings = {
     enabled = true,
-    glassWant = true,
-    winOpen = true,
-    transparency = 0.98,
-    color = Color3.fromRGB(248, 248, 252),
-    material = Enum.Material.Glass,
-    partName = "PulseAcrGlass",
-    zIndexOffset = 0.05,
-    baseDepth = 1.0,
+    scale = 1.0,
+    color = Color3.fromRGB(240, 160, 140),
+    tipColor = Color3.fromRGB(225, 120, 130),
+    material = Enum.Material.SmoothPlastic,
+    wobble = true,
+    wobbleSpeed = 8.0,
+    wobbleIntensity = 0.25,
+    angleOffset = 25,
 }
 
-local function createGlassWedge(name: string, material: Enum.Material): Part
-    local wedge = Instance.new("Part")
-    wedge.Name = name
-    wedge.Material = material
-    wedge.TopSurface = Enum.SurfaceType.Smooth
-    wedge.BottomSurface = Enum.SurfaceType.Smooth
-    wedge.Anchored = true
-    wedge.CanCollide = false
-    wedge.CanQuery = false
-    wedge.CanTouch = false
-    wedge.CastShadow = false
-    wedge.Size = Vector3.new(0.2, 0.2, 0.2)
+DildoManager.DefaultSettings = defaultSettings
 
-    local mesh = Instance.new("SpecialMesh")
-    mesh.Name = "M"
-    mesh.MeshType = Enum.MeshType.Wedge
-    mesh.Parent = wedge
+-- Хранилище активных объектов персонажей (состояние m из строки 9208)
+local activeStates: { [Model]: { wob: { any }?, wobSig: string?, wobAt: number? } } = {}
 
-    return wedge
+--=============================================================================
+-- 2. Деобфусцированная функция xP (строка 7895 в puls.orig.lua)
+--    Проверяет, не оторвались ли детали дальше 30 студов от торса
+--=============================================================================
+
+local function isDildoDetached(character: Model, state: { wob: { any }? }): boolean
+    if not state.wob then
+        return false
+    end
+
+    local firstPart: BasePart? = nil
+    for _, item in ipairs(state.wob) do
+        if typeof(item) == "Instance" and item:IsA("BasePart") then
+            firstPart = item
+            break
+        end
+    end
+
+    if not firstPart or not firstPart.Parent then
+        return true
+    end
+
+    local torso = character:FindFirstChild("HumanoidRootPart")
+        or character:FindFirstChild("LowerTorso")
+        or character:FindFirstChild("Torso")
+
+    if not torso or not torso:IsA("BasePart") then
+        return false
+    end
+
+    -- В оригинале: (U.Position - d.Position).Magnitude > 30
+    return (firstPart.Position - torso.Position).Magnitude > 30
 end
 
-function Pencil.drawTriangle3D(
-    p1: Vector3,
-    p2: Vector3,
-    p3: Vector3,
-    wedge1: Part?,
-    wedge2: Part?,
-    settings: PencilSettings?
-): (Part, Part)
-    local cfg = settings or defaultSettings
+--=============================================================================
+-- 3. Деобфусцированная функция t (строка 1774 в puls.orig.lua)
+--    Удаляет детали и отключает RBXScriptConnection
+--=============================================================================
 
-    local l1 = (p1 - p2).Magnitude
-    local l2 = (p2 - p3).Magnitude
-    local l3 = (p3 - p1).Magnitude
-    local maxLen = math.max(l1, l2, l3)
-
-    local a: Vector3, b: Vector3, c: Vector3
-    if l1 == maxLen then
-        a, b, c = p1, p2, p3
-    elseif l2 == maxLen then
-        a, b, c = p2, p3, p1
-    else
-        a, b, c = p3, p1, p2
-    end
-
-    local ab = a - b
-    local abMag = ab.Magnitude
-    local f = ((b - a).X * (c - a).X + (b - a).Y * (c - a).Y + (b - a).Z * (c - a).Z) / abMag
-    local height = math.sqrt(math.max((c - a).Magnitude ^ 2 - f * f, 0))
-    local length = abMag - f
-
-    local cf = CFrame.new(b, a)
-    local rot = CFrame.Angles(math.pi / 2, 0, 0)
-    local cf1 = cf
-    local look = (cf1 * rot).LookVector
-    local hPoint = a + CFrame.new(a, b).LookVector * f
-    local dir = CFrame.new(hPoint, c).LookVector
-    local dot = math.clamp(look.X * dir.X + look.Y * dir.Y + look.Z * dir.Z, -1.0, 1.0)
-    local angle = CFrame.Angles(0, 0, math.acos(dot))
-
-    cf1 = cf1 * angle
-    if ((cf1 * rot).LookVector - dir).Magnitude > 0.01 then
-        cf1 = cf1 * CFrame.Angles(0, 0, -2.0 * math.acos(dot))
-    end
-    cf1 = cf1 * CFrame.new(0, height / 2, -(length + f / 2))
-
-    local cf2 = cf * angle * CFrame.Angles(0, math.pi, 0)
-    if ((cf2 * rot).LookVector - dir).Magnitude > 0.01 then
-        cf2 = cf2 * CFrame.Angles(0, 0, 2.0 * math.acos(dot))
-    end
-    cf2 = cf2 * CFrame.new(0, height / 2, length / 2)
-
-    if not wedge1 then
-        wedge1 = createGlassWedge(cfg.partName, cfg.material)
-    end
-    if not wedge2 then
-        wedge2 = wedge1:Clone()
-    end
-
-    local m1 = wedge1:FindFirstChild("M") :: SpecialMesh? or wedge1:FindFirstChildOfClass("SpecialMesh")
-    if m1 then
-        m1.Scale = Vector3.new(0, height / 0.2, f / 0.2)
-    end
-    wedge1.CFrame = cf1
-
-    local m2 = wedge2:FindFirstChild("M") :: SpecialMesh? or wedge2:FindFirstChildOfClass("SpecialMesh")
-    if m2 then
-        m2.Scale = Vector3.new(0, height / 0.2, length / 0.2)
-    end
-    wedge2.CFrame = cf2
-
-    return wedge1, wedge2
-end
-
-function Pencil.drawQuad3D(
-    p1: Vector3,
-    p2: Vector3,
-    p3: Vector3,
-    p4: Vector3,
-    parts: { Part },
-    settings: PencilSettings?
-): ()
-    parts[1], parts[2] = Pencil.drawTriangle3D(p1, p2, p3, parts[1], parts[2], settings)
-    parts[3], parts[4] = Pencil.drawTriangle3D(p3, p2, p4, parts[3], parts[4], settings)
-end
-
-function Pencil.attach(rootFrame: GuiObject, customSettings: any?)
-    local settings: PencilSettings = table.clone(defaultSettings)
-    if customSettings then
-        for k, v in pairs(customSettings) do
-            settings[k] = v
-        end
-    end
-
-    local parts: { Part } = {}
-    local cache = {
-        cf = nil :: CFrame?,
-        vs = nil :: Vector2?,
-        fov = nil :: number?,
-        tl = nil :: Vector2?,
-        br = nil :: Vector2?,
-        z = nil :: number?,
-    }
-
-    local handler = {
-        settings = settings,
-        parts = parts,
-        root = rootFrame,
-        connection = nil :: RBXScriptConnection?,
-    }
-
-    function handler:hide()
-        for _, part in ipairs(parts) do
-            part.Parent = nil
-        end
-        cache.cf = nil
-    end
-
-    function handler:destroy()
-        if self.connection then
-            self.connection:Disconnect()
-            self.connection = nil
-        end
-        for _, part in ipairs(parts) do
-            part:Destroy()
-        end
-        table.clear(parts)
-    end
-
-    function handler:update()
-        local root = self.root
-        local cam = Workspace.CurrentCamera
-
-        if not (self.settings.enabled and self.settings.glassWant and self.settings.winOpen) then
-            self:hide()
-            return
-        end
-
-        if not (root and root.Parent and cam) or not root.Visible then
-            self:hide()
-            return
-        end
-
-        local screenGui = root:FindFirstAncestorWhichIsA("ScreenGui")
-        if screenGui and not screenGui.Enabled then
-            self:hide()
-            return
-        end
-
-        local zDist = self.settings.baseDepth - self.settings.zIndexOffset * (root.ZIndex or 1)
-        local tl = root.AbsolutePosition
-        local br = root.AbsolutePosition + root.AbsoluteSize
-        local cf = cam.CFrame
-        local vs = cam.ViewportSize
-        local fov = cam.FieldOfView
-
-        if parts[1]
-            and cache.cf == cf
-            and cache.vs == vs
-            and cache.fov == fov
-            and cache.tl == tl
-            and cache.br == br
-            and cache.z == zDist
-        then
-            for _, part in ipairs(parts) do
-                if part.Parent ~= cam then
-                    part.Parent = cam
+local function clearDildo(state: { wob: { any }?, wobSig: string?, wobAt: number? })
+    if state.wob then
+        for _, item in ipairs(state.wob) do
+            pcall(function()
+                if typeof(item) == "RBXScriptConnection" then
+                    item:Disconnect()
+                elseif typeof(item) == "Instance" then
+                    item:Destroy()
                 end
-                part.Transparency = self.settings.transparency
-                part.Color = self.settings.color
+            end)
+        end
+    end
+    state.wob = nil
+    state.wobSig = nil
+end
+
+--=============================================================================
+-- 4. Деобфусцированная функция DP (строка 2042 в puls.orig.lua)
+--    Фильтр для лучей/коллизий: игнорирует всё с префиксом "PulseWobble"
+--=============================================================================
+
+function DildoManager.isNotPulseWobble(part: Instance): boolean
+    if not part:IsA("BasePart") then
+        return false
+    end
+    if part:IsA("Terrain") then
+        return false
+    end
+    if (part :: BasePart).Transparency >= 1 then
+        return false
+    end
+    if part.Name:sub(1, 11) == "PulseWobble" then
+        return false
+    end
+    return true
+end
+
+--=============================================================================
+-- 5. Конструктор __pulseWobBuild (вызывается в строке 9226 puls.orig.lua)
+--    Создаёт 3D модель: цилиндрический стержень, два шара у основания и головку
+--=============================================================================
+
+local function pulseWobBuild(
+    character: Model,
+    scale: number,
+    outTable: { any },
+    isLocal: boolean,
+    customCfg: DildoSettings?
+)
+    local cfg = customCfg or defaultSettings
+    local sc = math.clamp(scale or 1, 0.2, 10)
+
+    -- Поиск точки крепления на теле (R15 LowerTorso или R6 Torso)
+    local rootPart = character:FindFirstChild("LowerTorso")
+        or character:FindFirstChild("Torso")
+        or character:FindFirstChild("HumanoidRootPart")
+
+    if not rootPart or not rootPart:IsA("BasePart") then
+        return
+    end
+
+    -- Папка-контейнер
+    local container = Instance.new("Folder")
+    container.Name = "PulseWobble_Container"
+    container.Parent = character
+    table.insert(outTable, container)
+
+    -- Размеры с учётом коэффициента scale
+    local shaftRadius = 0.35 * sc
+    local shaftLength = 2.0 * sc
+    local ballRadius = 0.5 * sc
+    local tipRadius = 0.4 * sc
+
+    -- 1. Левое яйцо (Sphere)
+    local ballL = Instance.new("Part")
+    ballL.Name = "PulseWobble_BallL"
+    ballL.Shape = Enum.PartType.Ball
+    ballL.Size = Vector3.new(ballRadius * 2, ballRadius * 2, ballRadius * 2)
+    ballL.Material = cfg.material
+    ballL.Color = cfg.color
+    ballL.CanCollide = false
+    ballL.Massless = true
+    ballL.CastShadow = false
+    ballL.Parent = container
+    table.insert(outTable, ballL)
+
+    -- 2. Правое яйцо (Sphere)
+    local ballR = Instance.new("Part")
+    ballR.Name = "PulseWobble_BallR"
+    ballR.Shape = Enum.PartType.Ball
+    ballR.Size = Vector3.new(ballRadius * 2, ballRadius * 2, ballRadius * 2)
+    ballR.Material = cfg.material
+    ballR.Color = cfg.color
+    ballR.CanCollide = false
+    ballR.Massless = true
+    ballR.CastShadow = false
+    ballR.Parent = container
+    table.insert(outTable, ballR)
+
+    -- 3. Стержень (Cylinder)
+    -- В Roblox Cylinder ориентирован вдоль оси X (Size.X = длина, Size.Y/Z = диаметр)
+    local shaft = Instance.new("Part")
+    shaft.Name = "PulseWobble_Shaft"
+    shaft.Shape = Enum.PartType.Cylinder
+    shaft.Size = Vector3.new(shaftLength, shaftRadius * 2, shaftRadius * 2)
+    shaft.Material = cfg.material
+    shaft.Color = cfg.color
+    shaft.CanCollide = false
+    shaft.Massless = true
+    shaft.CastShadow = false
+    shaft.Parent = container
+    table.insert(outTable, shaft)
+
+    -- 4. Головка (Sphere / SpecialMesh)
+    local tip = Instance.new("Part")
+    tip.Name = "PulseWobble_Tip"
+    tip.Shape = Enum.PartType.Ball
+    tip.Size = Vector3.new(tipRadius * 2, tipRadius * 2, tipRadius * 2)
+    tip.Material = cfg.material
+    tip.Color = cfg.tipColor
+    tip.CanCollide = false
+    tip.Massless = true
+    tip.CastShadow = false
+    tip.Parent = container
+    table.insert(outTable, tip)
+
+    -- Сварка яиц к торсу
+    local weldBallL = Instance.new("Weld")
+    weldBallL.Name = "WeldL"
+    weldBallL.Part0 = rootPart
+    weldBallL.Part1 = ballL
+    weldBallL.C0 = CFrame.new(-ballRadius * 0.7, -0.6 * sc, -0.45 * sc)
+    weldBallL.Parent = ballL
+    table.insert(outTable, weldBallL)
+
+    local weldBallR = Instance.new("Weld")
+    weldBallR.Name = "WeldR"
+    weldBallR.Part0 = rootPart
+    weldBallR.Part1 = ballR
+    weldBallR.C0 = CFrame.new(ballRadius * 0.7, -0.6 * sc, -0.45 * sc)
+    weldBallR.Parent = ballR
+    table.insert(outTable, weldBallR)
+
+    -- Motor6D для стержня (для динамического покачивания/вобблинга)
+    local motor = Instance.new("Motor6D")
+    motor.Name = "ShaftMotor"
+    motor.Part0 = rootPart
+    motor.Part1 = shaft
+    -- Базовая C0: вынос вперед и поворот цилиндра вдоль направления взгляда
+    local baseAngle = math.rad(cfg.angleOffset)
+    local baseC0 = CFrame.new(0, -0.5 * sc, -0.6 * sc) 
+        * CFrame.Angles(baseAngle, 0, 0)
+        * CFrame.Angles(0, math.rad(90), 0) -- разворот цилиндра Roblox торцом вперед
+        * CFrame.new(shaftLength / 2, 0, 0)
+
+    motor.C0 = baseC0
+    motor.Parent = shaft
+    table.insert(outTable, motor)
+
+    -- Сварка головки к концу цилиндра
+    local weldTip = Instance.new("Weld")
+    weldTip.Name = "WeldTip"
+    weldTip.Part0 = shaft
+    weldTip.Part1 = tip
+    weldTip.C0 = CFrame.new(shaftLength / 2, 0, 0)
+    weldTip.Parent = tip
+    table.insert(outTable, weldTip)
+
+    -- 6. Физическая анимация раскачивания (RenderStepped)
+    if cfg.wobble then
+        local clock = 0
+        local conn = RunService.RenderStepped:Connect(function(dt)
+            if not rootPart.Parent or not shaft.Parent then
+                return
             end
+            clock = clock + dt * cfg.wobbleSpeed
+
+            -- Учет скорости персонажа для естественной инерции
+            local vel = rootPart.AssemblyLinearVelocity or Vector3.zero
+            local horizSpeed = Vector3.new(vel.X, 0, vel.Z).Magnitude
+            local speedMultiplier = math.clamp(horizSpeed / 16, 0.5, 3.0)
+
+            local swayX = math.sin(clock) * cfg.wobbleIntensity * speedMultiplier
+            local swayY = math.cos(clock * 0.5) * (cfg.wobbleIntensity * 0.6) * speedMultiplier
+            local bounce = math.abs(math.sin(clock * 1.5)) * (cfg.wobbleIntensity * 0.4) * speedMultiplier
+
+            motor.C0 = baseC0 
+                * CFrame.Angles(0, swayX, swayY)
+                * CFrame.new(0, bounce, 0)
+        end)
+        table.insert(outTable, conn)
+    end
+end
+
+-- Регистрируем глобальный хук, как в строке 9223 puls.orig.lua
+getgenv().__pulseWobBuild = pulseWobBuild
+
+--=============================================================================
+-- 6. Деобфусцированная функция PP (строка 9205 в puls.orig.lua)
+--    Главный цикл привязки, валидации и перестроения
+--=============================================================================
+
+function DildoManager.apply(character: Model, scale: number?, customSettings: DildoSettings?)
+    local cfg = customSettings or defaultSettings
+    local sc = scale or cfg.scale or 1
+
+    local state = activeStates[character]
+    if not state then
+        state = { wob = nil, wobSig = nil, wobAt = 0 }
+        activeStates[character] = state
+    end
+
+    local sig = "w" .. tostring(sc)
+    local now = os.clock()
+
+    -- Проверка из строки 9211 puls.orig.lua:
+    -- если сигнатура совпадает, не оторвался ли объект и прошло ли < 2 сек
+    if sig == (state.wobSig or "") then
+        if not isDildoDetached(character, state) then
             return
         end
-
-        cache.cf, cache.vs, cache.fov, cache.tl, cache.br, cache.z = cf, vs, fov, tl, br, zDist
-
-        local tr = Vector2.new(br.X, tl.Y)
-        local bl = Vector2.new(tl.X, br.Y)
-
-        local rayTL = cam:ScreenPointToRay(tl.X, tl.Y, zDist)
-        local rayTR = cam:ScreenPointToRay(tr.X, tr.Y, zDist)
-        local rayBL = cam:ScreenPointToRay(bl.X, bl.Y, zDist)
-        local rayBR = cam:ScreenPointToRay(br.X, br.Y, zDist)
-
-        Pencil.drawQuad3D(
-            rayTL.Origin,
-            rayTR.Origin,
-            rayBL.Origin,
-            rayBR.Origin,
-            parts,
-            self.settings
-        )
-
-        for _, part in ipairs(parts) do
-            if part.Parent ~= cam then
-                part.Parent = cam
-            end
-            part.Transparency = self.settings.transparency
-            part.Color = self.settings.color
+        if now - (state.wobAt or 0) < 2 then
+            return
         end
     end
 
-    handler.connection = RunService.RenderStepped:Connect(function()
-        handler:update()
-    end)
+    state.wobAt = now
+    clearDildo(state)
+    state.wobSig = sig
 
-    return handler
+    local outTable: { any } = {}
+    local builder = getgenv().__pulseWobBuild or pulseWobBuild
+    pcall(builder, character, sc, outTable, true, cfg)
+    state.wob = outTable
 end
 
---=============================================================================
--- 2. СОЗДАНИЕ ИНТЕРФЕЙСА (GUI)
---=============================================================================
-
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = GUI_NAME
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = getGuiParent()
-
--- Главное окно
-local MainFrame = Instance.new("Frame")
-MainFrame.Name = "MainFrame"
-MainFrame.Size = UDim2.fromOffset(360, 420)
-MainFrame.Position = UDim2.new(0.5, -180, 0.5, -210)
-MainFrame.BackgroundColor3 = Color3.fromRGB(18, 19, 23)
-MainFrame.BackgroundTransparency = 0.35 -- Полупрозрачный фон, чтобы видеть 3D стекло
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.ZIndex = 2
-MainFrame.Parent = ScreenGui
-
-local MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 10)
-MainCorner.Parent = MainFrame
-
-local MainStroke = Instance.new("UIStroke")
-MainStroke.Color = Color3.fromRGB(255, 255, 255)
-MainStroke.Transparency = 0.82
-MainStroke.Thickness = 1.2
-MainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-MainStroke.Parent = MainFrame
-
--- Заголовок (TitleBar)
-local TitleBar = Instance.new("Frame")
-TitleBar.Name = "TitleBar"
-TitleBar.Size = UDim2.new(1, 0, 0, 36)
-TitleBar.BackgroundColor3 = Color3.fromRGB(12, 13, 16)
-TitleBar.BackgroundTransparency = 0.4
-TitleBar.BorderSizePixel = 0
-TitleBar.ZIndex = 3
-TitleBar.Parent = MainFrame
-
-local TitleCorner = Instance.new("UICorner")
-TitleCorner.CornerRadius = UDim.new(0, 10)
-TitleCorner.Parent = TitleBar
-
--- Блокировка скругления снизу заголовка
-local TitleBottomCover = Instance.new("Frame")
-TitleBottomCover.Size = UDim2.new(1, 0, 0, 10)
-TitleBottomCover.Position = UDim2.new(0, 0, 1, -10)
-TitleBottomCover.BackgroundColor3 = Color3.fromRGB(12, 13, 16)
-TitleBottomCover.BackgroundTransparency = 0.4
-TitleBottomCover.BorderSizePixel = 0
-TitleBottomCover.ZIndex = 3
-TitleBottomCover.Parent = TitleBar
-
-local TitleLabel = Instance.new("TextLabel")
-TitleLabel.Size = UDim2.new(1, -70, 1, 0)
-TitleLabel.Position = UDim2.fromOffset(12, 0)
-TitleLabel.BackgroundTransparency = 1
-TitleLabel.Font = Enum.Font.GothamBold
-TitleLabel.Text = "PENCIL • 3D ACRYLIC GLASS"
-TitleLabel.TextColor3 = Color3.fromRGB(240, 240, 245)
-TitleLabel.TextSize = 13
-TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
-TitleLabel.ZIndex = 4
-TitleLabel.Parent = TitleBar
-
--- Кнопка закрытия
-local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.fromOffset(26, 26)
-CloseBtn.Position = UDim2.new(1, -30, 0.5, -13)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(235, 75, 75)
-CloseBtn.BackgroundTransparency = 0.2
-CloseBtn.BorderSizePixel = 0
-CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.Text = "✕"
-CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-CloseBtn.TextSize = 12
-CloseBtn.ZIndex = 4
-CloseBtn.Parent = TitleBar
-
-local CloseCorner = Instance.new("UICorner")
-CloseCorner.CornerRadius = UDim.new(0, 6)
-CloseCorner.Parent = CloseBtn
-
--- Контейнер содержимого
-local Content = Instance.new("ScrollingFrame")
-Content.Name = "Content"
-Content.Size = UDim2.new(1, -20, 1, -48)
-Content.Position = UDim2.fromOffset(10, 42)
-Content.BackgroundTransparency = 1
-Content.BorderSizePixel = 0
-Content.ScrollBarThickness = 3
-Content.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 120)
-Content.CanvasSize = UDim2.fromOffset(0, 480)
-Content.ZIndex = 3
-Content.Parent = MainFrame
-
-local ContentLayout = Instance.new("UIListLayout")
-ContentLayout.SortOrder = Enum.SortOrder.LayoutOrder
-ContentLayout.Padding = UDim.new(0, 10)
-ContentLayout.Parent = Content
-
---=============================================================================
--- 3. ПРИВЯЗКА 3D СТЕКЛА К ОКНУ (PENCIL ACRYLIC)
---=============================================================================
-
-local acrylic = Pencil.attach(MainFrame, {
-    enabled = true,
-    glassWant = true,
-    winOpen = true,
-    transparency = 0.98,
-    color = Color3.fromRGB(248, 248, 252),
-})
-
---=============================================================================
--- 4. ХЕЛПЕРЫ ДЛЯ ЭЛЕМЕНТОВ ИНТЕРФЕЙСА
---=============================================================================
-
-local function createSection(title: string, order: number): (Frame, TextLabel)
-    local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, 0, 0, 70)
-    card.BackgroundColor3 = Color3.fromRGB(25, 27, 34)
-    card.BackgroundTransparency = 0.5
-    card.BorderSizePixel = 0
-    card.LayoutOrder = order
-    card.ZIndex = 4
-    card.Parent = Content
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = card
-
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(255, 255, 255)
-    stroke.Transparency = 0.9
-    stroke.Thickness = 1
-    stroke.Parent = card
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -16, 0, 24)
-    lbl.Position = UDim2.fromOffset(10, 4)
-    lbl.BackgroundTransparency = 1
-    lbl.Font = Enum.Font.GothamMedium
-    lbl.Text = title
-    lbl.TextColor3 = Color3.fromRGB(200, 205, 220)
-    lbl.TextSize = 12
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.ZIndex = 5
-    lbl.Parent = card
-
-    return card, lbl
-end
-
--- Кнопка-переключатель (Toggle)
-local function createToggle(parent: Frame, text: string, defaultState: boolean, callback: (boolean) -> ())
-    local state = defaultState
-
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -20, 0, 32)
-    btn.Position = UDim2.fromOffset(10, 30)
-    btn.BackgroundColor3 = state and Color3.fromRGB(50, 160, 95) or Color3.fromRGB(45, 48, 58)
-    btn.BorderSizePixel = 0
-    btn.Font = Enum.Font.GothamBold
-    btn.Text = text .. ": " .. (state and "ВКЛ (ON)" or "ВЫКЛ (OFF)")
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.TextSize = 12
-    btn.ZIndex = 5
-    btn.Parent = parent
-
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 6)
-    btnCorner.Parent = btn
-
-    btn.MouseButton1Click:Connect(function()
-        state = not state
-        btn.BackgroundColor3 = state and Color3.fromRGB(50, 160, 95) or Color3.fromRGB(45, 48, 58)
-        btn.Text = text .. ": " .. (state and "ВКЛ (ON)" or "ВЫКЛ (OFF)")
-        callback(state)
-    end)
-
-    return btn
-end
-
---=============================================================================
--- 5. СОДЕРЖИМОЕ ОКНА НАСТРОЕК
---=============================================================================
-
--- 1. Секция: Переключатель 3D Акрила
-local card1 = createSection("ОСНОВНОЙ ЭФФЕКТ СТЕКЛА", 1)
-createToggle(card1, "3D Acrylic Blur", true, function(enabled)
-    acrylic.settings.glassWant = enabled
-    acrylic.settings.enabled = enabled
-    if not enabled then
-        acrylic:hide()
+-- Полное снятие
+function DildoManager.remove(character: Model)
+    local state = activeStates[character]
+    if state then
+        clearDildo(state)
+        activeStates[character] = nil
     end
-end)
+end
 
--- 2. Секция: Прозрачность (Transparency)
-local card2, card2Lbl = createSection("ПРОЗРАЧНОСТЬ СТЕКЛА (КЛИНИ)", 2)
-card2.Size = UDim2.new(1, 0, 0, 80)
+--=============================================================================
+-- 7. Быстрый запуск для локального игрока
+--=============================================================================
 
-local trValues = { 0.95, 0.98, 0.99 }
-local trButtons = {}
+function DildoManager.attachToLocalPlayer(scale: number?, customSettings: DildoSettings?)
+    local lp = Players.LocalPlayer
+    local char = lp.Character or lp.CharacterAdded:Wait()
+    
+    DildoManager.apply(char, scale, customSettings)
 
-for idx, tr in ipairs(trValues) do
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0.31, 0, 0, 30)
-    b.Position = UDim2.new(0.02 + (idx - 1) * 0.33, 0, 0, 36)
-    b.BackgroundColor3 = (tr == acrylic.settings.transparency) and Color3.fromRGB(80, 120, 220) or Color3.fromRGB(40, 43, 52)
-    b.BorderSizePixel = 0
-    b.Font = Enum.Font.GothamMedium
-    b.Text = tostring(tr)
-    b.TextColor3 = Color3.fromRGB(240, 240, 250)
-    b.TextSize = 12
-    b.ZIndex = 5
-    b.Parent = card2
-
-    local bc = Instance.new("UICorner")
-    bc.CornerRadius = UDim.new(0, 6)
-    bc.Parent = b
-
-    trButtons[tr] = b
-
-    b.MouseButton1Click:Connect(function()
-        acrylic.settings.transparency = tr
-        for _, otherB in pairs(trButtons) do
-            otherB.BackgroundColor3 = Color3.fromRGB(40, 43, 52)
-        end
-        b.BackgroundColor3 = Color3.fromRGB(80, 120, 220)
+    -- Авто-восстановление при респавне
+    lp.CharacterAdded:Connect(function(newChar)
+        task.wait(0.5)
+        DildoManager.apply(newChar, scale, customSettings)
     end)
 end
 
--- 3. Секция: Оттенки цвета стекла
-local card3 = createSection("ОТТЕНОК СТЕКЛА (COLOR PRESET)", 3)
-card3.Size = UDim2.new(1, 0, 0, 85)
-
-local presets = {
-    { name = "Стандарт", col = Color3.fromRGB(248, 248, 252) },
-    { name = "Холодный", col = Color3.fromRGB(180, 215, 255) },
-    { name = "Неон", col = Color3.fromRGB(255, 140, 210) },
-    { name = "Изумруд", col = Color3.fromRGB(150, 255, 190) },
-}
-
-for i, p in ipairs(presets) do
-    local pb = Instance.new("TextButton")
-    pb.Size = UDim2.new(0.46, 0, 0, 26)
-    local colIdx = (i - 1) % 2
-    local rowIdx = math.floor((i - 1) / 2)
-    pb.Position = UDim2.new(0.03 + colIdx * 0.49, 0, 0, 30 + rowIdx * 30)
-    pb.BackgroundColor3 = Color3.fromRGB(35, 38, 48)
-    pb.BorderSizePixel = 0
-    pb.Font = Enum.Font.GothamMedium
-    pb.Text = p.name
-    pb.TextColor3 = p.col
-    pb.TextSize = 11
-    pb.ZIndex = 5
-    pb.Parent = card3
-
-    local pc = Instance.new("UICorner")
-    pc.CornerRadius = UDim.new(0, 6)
-    pc.Parent = pb
-
-    pb.MouseButton1Click:Connect(function()
-        acrylic.settings.color = p.col
+-- Авто-запуск для экзекутора при прямом выполнении скрипта
+if not getgenv().__disableAutoRun then
+    pcall(function()
+        DildoManager.attachToLocalPlayer(1.5)
     end)
 end
 
--- 4. Секция: Демо 3D Треугольника в мире (DrawTriangle3D)
-local card4 = createSection("3D ТРЕУГОЛЬНИК В МИРЕ (PENCIL 3D)", 4)
-local demoWedges: { Part } = {}
-local demoConn: RBXScriptConnection? = nil
-
-createToggle(card4, "3D Rotating Triangle", false, function(active)
-    if active then
-        local angle = 0
-        demoConn = RunService.RenderStepped:Connect(function(dt)
-            local char = LocalPlayer.Character
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            if not root then return end
-
-            angle = (angle + dt * 2) % (math.pi * 2)
-            local center = root.Position + root.CFrame.LookVector * 10 + Vector3.new(0, 1, 0)
-            
-            local r = 4
-            local p1 = center + Vector3.new(math.cos(angle) * r, math.sin(angle) * 2, math.sin(angle) * r)
-            local p2 = center + Vector3.new(math.cos(angle + 2.1) * r, -1, math.sin(angle + 2.1) * r)
-            local p3 = center + Vector3.new(math.cos(angle + 4.2) * r, 2, math.sin(angle + 4.2) * r)
-
-            demoWedges[1], demoWedges[2] = Pencil.drawTriangle3D(p1, p2, p3, demoWedges[1], demoWedges[2])
-            for _, w in ipairs(demoWedges) do
-                w.Parent = Workspace
-                w.Material = Enum.Material.Neon
-                w.Color = Color3.fromHSV((angle / (math.pi * 2)), 0.8, 1)
-                w.Transparency = 0.2
-            end
-        end)
-    else
-        if demoConn then
-            demoConn:Disconnect()
-            demoConn = nil
-        end
-        for _, w in ipairs(demoWedges) do
-            w:Destroy()
-        end
-        table.clear(demoWedges)
-    end
-end)
-
---=============================================================================
--- 6. ПЕРЕТАСКИВАНИЕ ОКНА (DRAGGABLE WINDOW)
---=============================================================================
-
-local dragging = false
-local dragInput: InputObject? = nil
-local dragStart: Vector3? = nil
-local startPos: UDim2? = nil
-
-TitleBar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPos = MainFrame.Position
-
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
-    end
-end)
-
-TitleBar.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        dragInput = input
-    end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-    if input == dragInput and dragging and dragStart and startPos then
-        local delta = input.Position - dragStart
-        MainFrame.Position = UDim2.new(
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
-        )
-    end
-end)
-
---=============================================================================
--- 7. ЗАКРЫТИЕ И ВЫГРУЗКА (CLEANUP)
---=============================================================================
-
-local function unload()
-    if demoConn then
-        demoConn:Disconnect()
-        demoConn = nil
-    end
-    for _, w in ipairs(demoWedges) do
-        w:Destroy()
-    end
-    table.clear(demoWedges)
-
-    acrylic:destroy()
-    ScreenGui:Destroy()
-end
-
-CloseBtn.MouseButton1Click:Connect(unload)
-
-print("[Pencil] 3D Acrylic Glass GUI успешно запущен!")
+return DildoManager
