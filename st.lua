@@ -1,16 +1,18 @@
 --!nonstrict
 --[[
     =============================================================================
-    dildo.lua — Полный деобфусцированный модуль "PP" / "PulseWobble" (3D Дилдак)
-    Извлечено из: C:\script-dumps\slient\pensil\puls.orig.lua
+    dildo.lua / pencil.lua — Полный деобфусцированный физический "PP" / "PulseWobble"
+    Извлечено и реконструировано из: C:\script-dumps\slient\pensil\puls.orig.lua
     
-    В оригинальном дампе:
-      * PP (строка 9205): Менеджер создания и жизненного цикла ("PP")
-      * t  (строка 1774): Очистка деталей и отключение RunService-соединений
-      * xP (строка 7895): Проверка отрыва от LowerTorso/Torso (> 30 studs)
-      * DP (строка 2042): Фильтр коллизий и рейкастов (префикс "PulseWobble")
-      * cP (строка 542) : Диспетчер косметики персонажа (K.wob -> scale)
-      * getgenv().__pulseWobBuild: Внешний конструктор геометрии (воссоздан до байта)
+    Включает:
+      * PP (строка 9205): Менеджер жизненного цикла и регистрации сигнатуры
+      * t  (строка 1774): Деструктор (очистка деталей, связей и RunService-соединений)
+      * xP (строка 7895): Валидатор позиции торса (дистанция > 30 studs -> пересоздание)
+      * DP (строка 2042): Игнорирование лучей и коллизий (префикс "PulseWobble")
+      * cP (строка 542) : Хук косметики K.wob
+      * Полная физика: BallSocketConstraint + SpringConstraint + Верле-пружина раскачивания
+      * Полная анатомия: Стержень с венами, асимметричные яйца, головка с венчиком
+      * Волосатость (Pubic Hair): Процедурный пояс кудрявых тёмных волос вокруг основания
     =============================================================================
 ]]
 
@@ -22,41 +24,59 @@ local DildoManager = {}
 DildoManager.__index = DildoManager
 
 --=============================================================================
--- 1. Настройки по умолчанию
+-- 1. Настройки модели и физики
 --=============================================================================
 
 export type DildoSettings = {
-    enabled: boolean,          -- Включён ли объект
-    scale: number,             -- Масштаб размера (в дампе a.sc, по дефолту 1.0)
-    color: Color3,             -- Цвет (телесный по умолчанию)
-    tipColor: Color3,          -- Цвет головки
-    material: Enum.Material,   -- Материал (SmoothPlastic / Neon)
-    wobble: boolean,           -- Физика раскачивания при движении
-    wobbleSpeed: number,       -- Скорость покачивания
-    wobbleIntensity: number,   -- Амплитуда покачивания
-    angleOffset: number,       -- Базовый угол наклона в градусах
+    enabled: boolean,
+    scale: number,              -- Общий множитель размера (sc)
+    color: Color3,              -- Цвет стержня и яиц
+    tipColor: Color3,           -- Цвет головки (венчик)
+    veinColor: Color3,          -- Цвет вен
+    hairColor: Color3,          -- Цвет волос
+    material: Enum.Material,    -- Материал плоти (SmoothPlastic)
+    
+    -- Настройки волосатости
+    hairy: boolean,             -- Включить волосы у основания
+    hairCount: number,          -- Количество завитков волос
+    hairDensity: number,        -- Плотность кудрей
+    
+    -- Настройки физики (Spring & Inertia)
+    physics: boolean,           -- Физическое раскачивание от инерции и шагов
+    springStiffness: number,    -- Упругость пружины
+    springDamping: number,      -- Затухание колебаний
+    angleOffset: number,        -- Базовый угол стояка (в градусах от вертикали)
+    gravityDroop: number,       -- Провисание под силой тяжести
 }
 
 local defaultSettings: DildoSettings = {
     enabled = true,
     scale = 1.0,
     color = Color3.fromRGB(240, 160, 140),
-    tipColor = Color3.fromRGB(225, 120, 130),
+    tipColor = Color3.fromRGB(225, 115, 125),
+    veinColor = Color3.fromRGB(190, 120, 140),
+    hairColor = Color3.fromRGB(20, 18, 16),
     material = Enum.Material.SmoothPlastic,
-    wobble = true,
-    wobbleSpeed = 8.0,
-    wobbleIntensity = 0.25,
-    angleOffset = 25,
+    
+    hairy = true,
+    hairCount = 28,
+    hairDensity = 1.0,
+    
+    physics = true,
+    springStiffness = 140.0,
+    springDamping = 12.0,
+    angleOffset = 25.0,
+    gravityDroop = 0.35,
 }
 
 DildoManager.DefaultSettings = defaultSettings
 
--- Хранилище активных объектов персонажей (состояние m из строки 9208)
+-- Таблица состояний персонажей (как m из puls.orig.lua:9208)
 local activeStates: { [Model]: { wob: { any }?, wobSig: string?, wobAt: number? } } = {}
 
 --=============================================================================
--- 2. Деобфусцированная функция xP (строка 7895 в puls.orig.lua)
---    Проверяет, не оторвались ли детали дальше 30 студов от торса
+-- 2. Деобфусцированная функция xP (строка 7895 puls.orig.lua)
+--    Проверяет отрыв дальше 30 студов
 --=============================================================================
 
 local function isDildoDetached(character: Model, state: { wob: { any }? }): boolean
@@ -84,13 +104,12 @@ local function isDildoDetached(character: Model, state: { wob: { any }? }): bool
         return false
     end
 
-    -- В оригинале: (U.Position - d.Position).Magnitude > 30
     return (firstPart.Position - torso.Position).Magnitude > 30
 end
 
 --=============================================================================
--- 3. Деобфусцированная функция t (строка 1774 в puls.orig.lua)
---    Удаляет детали и отключает RBXScriptConnection
+-- 3. Деобфусцированная функция t (строка 1774 puls.orig.lua)
+--    Деструктор: глушит коннекты и уничтожает детали
 --=============================================================================
 
 local function clearDildo(state: { wob: { any }?, wobSig: string?, wobAt: number? })
@@ -110,8 +129,8 @@ local function clearDildo(state: { wob: { any }?, wobSig: string?, wobAt: number
 end
 
 --=============================================================================
--- 4. Деобфусцированная функция DP (строка 2042 в puls.orig.lua)
---    Фильтр для лучей/коллизий: игнорирует всё с префиксом "PulseWobble"
+-- 4. Деобфусцированная функция DP (строка 2042 puls.orig.lua)
+--    Фильтр raycast/overlap для деталей "PulseWobble"
 --=============================================================================
 
 function DildoManager.isNotPulseWobble(part: Instance): boolean
@@ -131,8 +150,8 @@ function DildoManager.isNotPulseWobble(part: Instance): boolean
 end
 
 --=============================================================================
--- 5. Конструктор __pulseWobBuild (вызывается в строке 9226 puls.orig.lua)
---    Создаёт 3D модель: цилиндрический стержень, два шара у основания и головку
+-- 5. Полный конструктор __pulseWobBuild (строка 9226 puls.orig.lua)
+--    С физикой пружин, венами, асимметрией и волосами у основания
 --=============================================================================
 
 local function pulseWobBuild(
@@ -145,7 +164,7 @@ local function pulseWobBuild(
     local cfg = customCfg or defaultSettings
     local sc = math.clamp(scale or 1, 0.2, 10)
 
-    -- Поиск точки крепления на теле (R15 LowerTorso или R6 Torso)
+    -- Поиск корня крепления на теле (LowerTorso для R15, Torso для R6)
     local rootPart = character:FindFirstChild("LowerTorso")
         or character:FindFirstChild("Torso")
         or character:FindFirstChild("HumanoidRootPart")
@@ -154,145 +173,240 @@ local function pulseWobBuild(
         return
     end
 
-    -- Папка-контейнер
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+    -- Контейнер для лёгкого удаления
     local container = Instance.new("Folder")
     container.Name = "PulseWobble_Container"
     container.Parent = character
     table.insert(outTable, container)
 
-    -- Размеры с учётом коэффициента scale
-    local shaftRadius = 0.35 * sc
-    local shaftLength = 2.0 * sc
-    local ballRadius = 0.5 * sc
-    local tipRadius = 0.4 * sc
+    -- Геометрические размеры
+    local shaftRadius = 0.36 * sc
+    local shaftLength = 2.2 * sc
+    local ballRadius = 0.52 * sc
+    local tipRadius = 0.42 * sc
 
-    -- 1. Левое яйцо (Sphere)
-    local ballL = Instance.new("Part")
-    ballL.Name = "PulseWobble_BallL"
-    ballL.Shape = Enum.PartType.Ball
-    ballL.Size = Vector3.new(ballRadius * 2, ballRadius * 2, ballRadius * 2)
-    ballL.Material = cfg.material
-    ballL.Color = cfg.color
-    ballL.CanCollide = false
-    ballL.Massless = true
-    ballL.CastShadow = false
-    ballL.Parent = container
-    table.insert(outTable, ballL)
+    local function makePart(name: string, shape: Enum.PartType, size: Vector3, col: Color3): Part
+        local p = Instance.new("Part")
+        p.Name = "PulseWobble_" .. name
+        p.Shape = shape
+        p.Size = size
+        p.Material = cfg.material
+        p.Color = col
+        p.CanCollide = false
+        p.CanQuery = false
+        p.CanTouch = false
+        p.Massless = true
+        p.CastShadow = false
+        p.Parent = container
+        table.insert(outTable, p)
+        return p
+    end
 
-    -- 2. Правое яйцо (Sphere)
-    local ballR = Instance.new("Part")
-    ballR.Name = "PulseWobble_BallR"
-    ballR.Shape = Enum.PartType.Ball
-    ballR.Size = Vector3.new(ballRadius * 2, ballRadius * 2, ballRadius * 2)
-    ballR.Material = cfg.material
-    ballR.Color = cfg.color
-    ballR.CanCollide = false
-    ballR.Massless = true
-    ballR.CastShadow = false
-    ballR.Parent = container
-    table.insert(outTable, ballR)
+    -- 1. Яйца (Balls) с естественной асимметрией (левое чуть ниже правого)
+    local ballL = makePart("BallL", Enum.PartType.Ball, Vector3.new(ballRadius * 2, ballRadius * 2.1, ballRadius * 2), cfg.color)
+    local ballR = makePart("BallR", Enum.PartType.Ball, Vector3.new(ballRadius * 1.95, ballRadius * 2.0, ballRadius * 1.95), cfg.color)
 
-    -- 3. Стержень (Cylinder)
-    -- В Roblox Cylinder ориентирован вдоль оси X (Size.X = длина, Size.Y/Z = диаметр)
-    local shaft = Instance.new("Part")
-    shaft.Name = "PulseWobble_Shaft"
-    shaft.Shape = Enum.PartType.Cylinder
-    shaft.Size = Vector3.new(shaftLength, shaftRadius * 2, shaftRadius * 2)
-    shaft.Material = cfg.material
-    shaft.Color = cfg.color
-    shaft.CanCollide = false
-    shaft.Massless = true
-    shaft.CastShadow = false
-    shaft.Parent = container
-    table.insert(outTable, shaft)
+    local wBallL = Instance.new("Weld")
+    wBallL.Name = "Weld_BallL"
+    wBallL.Part0 = rootPart
+    wBallL.Part1 = ballL
+    wBallL.C0 = CFrame.new(-ballRadius * 0.72, -0.62 * sc, -0.42 * sc)
+    wBallL.Parent = ballL
+    table.insert(outTable, wBallL)
 
-    -- 4. Головка (Sphere / SpecialMesh)
-    local tip = Instance.new("Part")
-    tip.Name = "PulseWobble_Tip"
-    tip.Shape = Enum.PartType.Ball
-    tip.Size = Vector3.new(tipRadius * 2, tipRadius * 2, tipRadius * 2)
-    tip.Material = cfg.material
-    tip.Color = cfg.tipColor
-    tip.CanCollide = false
-    tip.Massless = true
-    tip.CastShadow = false
-    tip.Parent = container
-    table.insert(outTable, tip)
+    local wBallR = Instance.new("Weld")
+    wBallR.Name = "Weld_BallR"
+    wBallR.Part0 = rootPart
+    wBallR.Part1 = ballR
+    wBallR.C0 = CFrame.new(ballRadius * 0.72, -0.56 * sc, -0.42 * sc) -- чуть выше левого
+    wBallR.Parent = ballR
+    table.insert(outTable, wBallR)
 
-    -- Сварка яиц к торсу
-    local weldBallL = Instance.new("Weld")
-    weldBallL.Name = "WeldL"
-    weldBallL.Part0 = rootPart
-    weldBallL.Part1 = ballL
-    weldBallL.C0 = CFrame.new(-ballRadius * 0.7, -0.6 * sc, -0.45 * sc)
-    weldBallL.Parent = ballL
-    table.insert(outTable, weldBallL)
+    -- 2. ВОЛОСЫ У ОСНОВАНИЯ (Pubic Hair System)
+    if cfg.hairy then
+        local hairFolder = Instance.new("Folder")
+        hairFolder.Name = "PulseWobble_Hair"
+        hairFolder.Parent = container
+        table.insert(outTable, hairFolder)
 
-    local weldBallR = Instance.new("Weld")
-    weldBallR.Name = "WeldR"
-    weldBallR.Part0 = rootPart
-    weldBallR.Part1 = ballR
-    weldBallR.C0 = CFrame.new(ballRadius * 0.7, -0.6 * sc, -0.45 * sc)
-    weldBallR.Parent = ballR
-    table.insert(outTable, weldBallR)
+        local count = math.floor(cfg.hairCount * cfg.hairDensity)
+        for i = 1, count do
+            local angle = (i / count) * math.pi * 2 + (math.random() - 0.5) * 0.4
+            local radDist = (0.55 + math.random() * 0.35) * sc
 
-    -- Motor6D для стержня (для динамического покачивания/вобблинга)
+            -- Распределение волос над основанием и по бокам яиц
+            local hX = math.cos(angle) * radDist * 1.1
+            local hY = -0.55 * sc + math.sin(angle) * radDist * 0.4
+            local hZ = -0.45 * sc + (math.sin(angle) > 0 and -0.2 or 0.1) * sc
+
+            local hairPart = Instance.new("Part")
+            hairPart.Name = "PulseWobble_HairStrand"
+            hairPart.Shape = Enum.PartType.Cylinder
+            hairPart.Material = Enum.Material.SmoothPlastic
+            hairPart.Color = cfg.hairColor
+            hairPart.CanCollide = false
+            hairPart.CanQuery = false
+            hairPart.CanTouch = false
+            hairPart.Massless = true
+            hairPart.CastShadow = false
+
+            -- Кудрявый завиток (тонкий короткий цилиндр)
+            local strandLen = (0.35 + math.random() * 0.25) * sc
+            local strandThickness = (0.05 + math.random() * 0.03) * sc
+            hairPart.Size = Vector3.new(strandLen, strandThickness, strandThickness)
+
+            local wHair = Instance.new("Weld")
+            wHair.Part0 = rootPart
+            wHair.Part1 = hairPart
+            -- Случайный угол загиба для кудрявого эффекта
+            local curlRot = CFrame.Angles(
+                math.rad(math.random(-45, 45)),
+                math.rad(math.random(-180, 180)),
+                math.rad(math.random(-60, 60))
+            )
+            wHair.C0 = CFrame.new(hX, hY, hZ) * curlRot
+            wHair.Parent = hairPart
+
+            hairPart.Parent = hairFolder
+            table.insert(outTable, hairPart)
+            table.insert(outTable, wHair)
+        end
+    end
+
+    -- 3. Стержень (Shaft)
+    local shaft = makePart("Shaft", Enum.PartType.Cylinder, Vector3.new(shaftLength, shaftRadius * 2, shaftRadius * 2), cfg.color)
+
+    -- Вены вдоль стержня (Veins)
+    local vein1 = makePart("Vein1", Enum.PartType.Cylinder, Vector3.new(shaftLength * 0.85, shaftRadius * 0.22, shaftRadius * 0.22), cfg.veinColor)
+    local wVein1 = Instance.new("Weld")
+    wVein1.Part0 = shaft
+    wVein1.Part1 = vein1
+    wVein1.C0 = CFrame.new(0, shaftRadius * 0.92, shaftRadius * 0.3) * CFrame.Angles(0, 0, math.rad(4))
+    wVein1.Parent = vein1
+    table.insert(outTable, wVein1)
+
+    local vein2 = makePart("Vein2", Enum.PartType.Cylinder, Vector3.new(shaftLength * 0.75, shaftRadius * 0.18, shaftRadius * 0.18), cfg.veinColor)
+    local wVein2 = Instance.new("Weld")
+    wVein2.Part0 = shaft
+    wVein2.Part1 = vein2
+    wVein2.C0 = CFrame.new(0, -shaftRadius * 0.88, -shaftRadius * 0.25) * CFrame.Angles(0, 0, math.rad(-5))
+    wVein2.Parent = vein2
+    table.insert(outTable, wVein2)
+
+    -- 4. Головка (Glans / Head) с венчиком (Corona)
+    local corona = makePart("Corona", Enum.PartType.Cylinder, Vector3.new(0.3 * sc, tipRadius * 2.1, tipRadius * 2.1), cfg.tipColor)
+    local wCorona = Instance.new("Weld")
+    wCorona.Part0 = shaft
+    wCorona.Part1 = corona
+    wCorona.C0 = CFrame.new(shaftLength / 2 - 0.1 * sc, 0, 0)
+    wCorona.Parent = corona
+    table.insert(outTable, wCorona)
+
+    local tip = makePart("Tip", Enum.PartType.Ball, Vector3.new(tipRadius * 2, tipRadius * 1.95, tipRadius * 1.95), cfg.tipColor)
+    local wTip = Instance.new("Weld")
+    wTip.Part0 = shaft
+    wTip.Part1 = tip
+    wTip.C0 = CFrame.new(shaftLength / 2 + tipRadius * 0.65, 0, 0)
+    wTip.Parent = tip
+    table.insert(outTable, wTip)
+
+    -- 5. ФИЗИЧЕСКИЙ MOTOR6D / СВЯЗЬ К ТОРСУ
     local motor = Instance.new("Motor6D")
     motor.Name = "ShaftMotor"
     motor.Part0 = rootPart
     motor.Part1 = shaft
-    -- Базовая C0: вынос вперед и поворот цилиндра вдоль направления взгляда
+
+    -- Исходное положение C0 (наклон торцом вперед вдоль направления взгляда персонажа)
     local baseAngle = math.rad(cfg.angleOffset)
-    local baseC0 = CFrame.new(0, -0.5 * sc, -0.6 * sc) 
+    local baseC0 = CFrame.new(0, -0.48 * sc, -0.58 * sc)
         * CFrame.Angles(baseAngle, 0, 0)
-        * CFrame.Angles(0, math.rad(90), 0) -- разворот цилиндра Roblox торцом вперед
+        * CFrame.Angles(0, math.rad(90), 0)
         * CFrame.new(shaftLength / 2, 0, 0)
 
     motor.C0 = baseC0
     motor.Parent = shaft
     table.insert(outTable, motor)
 
-    -- Сварка головки к концу цилиндра
-    local weldTip = Instance.new("Weld")
-    weldTip.Name = "WeldTip"
-    weldTip.Part0 = shaft
-    weldTip.Part1 = tip
-    weldTip.C0 = CFrame.new(shaftLength / 2, 0, 0)
-    weldTip.Parent = tip
-    table.insert(outTable, weldTip)
+    -- 6. ДВУХРЕЖИМНАЯ ДИНАМИЧЕСКАЯ ФИЗИКА (ПРУЖИНА ВЕРЛЕ + ИНЕРЦИЯ + ТРЯСКА)
+    if cfg.physics then
+        local currentPitch = 0
+        local currentYaw = 0
+        local currentRoll = 0
 
-    -- 6. Физическая анимация раскачивания (RenderStepped)
-    if cfg.wobble then
-        local clock = 0
+        local velPitch = 0
+        local velYaw = 0
+        local velRoll = 0
+
+        local lastRootCF = rootPart.CFrame
+        local lastTime = os.clock()
+
         local conn = RunService.RenderStepped:Connect(function(dt)
             if not rootPart.Parent or not shaft.Parent then
                 return
             end
-            clock = clock + dt * cfg.wobbleSpeed
+            dt = math.clamp(dt, 0.001, 0.05)
 
-            -- Учет скорости персонажа для естественной инерции
-            local vel = rootPart.AssemblyLinearVelocity or Vector3.zero
-            local horizSpeed = Vector3.new(vel.X, 0, vel.Z).Magnitude
-            local speedMultiplier = math.clamp(horizSpeed / 16, 0.5, 3.0)
+            -- Вычисление линейного и углового ускорения торса
+            local curRootCF = rootPart.CFrame
+            local rootVel = rootPart.AssemblyLinearVelocity or Vector3.zero
+            local rootAngVel = rootPart.AssemblyAngularVelocity or Vector3.zero
 
-            local swayX = math.sin(clock) * cfg.wobbleIntensity * speedMultiplier
-            local swayY = math.cos(clock * 0.5) * (cfg.wobbleIntensity * 0.6) * speedMultiplier
-            local bounce = math.abs(math.sin(clock * 1.5)) * (cfg.wobbleIntensity * 0.4) * speedMultiplier
+            -- Локальная скорость персонажа
+            local localVel = curRootCF:VectorToObjectSpace(rootVel)
+            local speedZ = localVel.Z -- вперед/назад
+            local speedX = localVel.X -- стрейф влево/вправо
+            local speedY = localVel.Y -- прыжки/падение
 
-            motor.C0 = baseC0 
-                * CFrame.Angles(0, swayX, swayY)
-                * CFrame.new(0, bounce, 0)
+            -- Инерционные силы
+            local targetPitch = math.clamp(-speedZ * 0.04 - speedY * 0.05 + cfg.gravityDroop, -0.8, 0.9)
+            local targetYaw = math.clamp(-speedX * 0.05 - rootAngVel.Y * 0.15, -0.8, 0.8)
+            local targetRoll = math.clamp(speedX * 0.03, -0.5, 0.5)
+
+            -- Добавочная синусоида при ходьбе (шаги)
+            local horizSpeed = Vector3.new(rootVel.X, 0, rootVel.Z).Magnitude
+            if horizSpeed > 1 then
+                local stepFreq = (humanoid and humanoid.WalkSpeed or 16) * 0.45
+                local stepClock = os.clock() * stepFreq
+                local bounce = math.sin(stepClock) * math.clamp(horizSpeed / 16, 0.2, 1.2) * 0.15
+                local sway = math.cos(stepClock * 0.5) * math.clamp(horizSpeed / 16, 0.2, 1.2) * 0.12
+
+                targetPitch = targetPitch + bounce
+                targetYaw = targetYaw + sway
+            end
+
+            -- Пружинный интегратор Верле (Spring Physics)
+            local stiffness = cfg.springStiffness
+            local damping = cfg.springDamping
+
+            -- Осевые силы возврата
+            local forcePitch = (targetPitch - currentPitch) * stiffness - velPitch * damping
+            local forceYaw = (targetYaw - currentYaw) * stiffness - velYaw * damping
+            local forceRoll = (targetRoll - currentRoll) * stiffness - velRoll * damping
+
+            velPitch = velPitch + forcePitch * dt
+            velYaw = velYaw + forceYaw * dt
+            velRoll = velRoll + forceRoll * dt
+
+            currentPitch = currentPitch + velPitch * dt
+            currentYaw = currentYaw + velYaw * dt
+            currentRoll = currentRoll + velRoll * dt
+
+            -- Применение динамического CFrame
+            motor.C0 = baseC0
+                * CFrame.Angles(currentRoll, currentYaw, currentPitch)
         end)
         table.insert(outTable, conn)
     end
 end
 
--- Регистрируем глобальный хук, как в строке 9223 puls.orig.lua
+-- Регистрация внешнего конструктора для вызова из puls.orig.lua:9223
 getgenv().__pulseWobBuild = pulseWobBuild
 
 --=============================================================================
--- 6. Деобфусцированная функция PP (строка 9205 в puls.orig.lua)
---    Главный цикл привязки, валидации и перестроения
+-- 6. Деобфусцированная функция PP (строка 9205 puls.orig.lua)
+--    Контроллер сигнатуры "w" .. scale и повторной инициализации
 --=============================================================================
 
 function DildoManager.apply(character: Model, scale: number?, customSettings: DildoSettings?)
@@ -308,8 +422,7 @@ function DildoManager.apply(character: Model, scale: number?, customSettings: Di
     local sig = "w" .. tostring(sc)
     local now = os.clock()
 
-    -- Проверка из строки 9211 puls.orig.lua:
-    -- если сигнатура совпадает, не оторвался ли объект и прошло ли < 2 сек
+    -- Логика из строки 9211 puls.orig.lua
     if sig == (state.wobSig or "") then
         if not isDildoDetached(character, state) then
             return
@@ -329,7 +442,7 @@ function DildoManager.apply(character: Model, scale: number?, customSettings: Di
     state.wob = outTable
 end
 
--- Полное снятие
+-- Полное удаление
 function DildoManager.remove(character: Model)
     local state = activeStates[character]
     if state then
@@ -339,26 +452,29 @@ function DildoManager.remove(character: Model)
 end
 
 --=============================================================================
--- 7. Быстрый запуск для локального игрока
+-- 7. Быстрый запуск для LocalPlayer
 --=============================================================================
 
 function DildoManager.attachToLocalPlayer(scale: number?, customSettings: DildoSettings?)
     local lp = Players.LocalPlayer
     local char = lp.Character or lp.CharacterAdded:Wait()
-    
+
     DildoManager.apply(char, scale, customSettings)
 
-    -- Авто-восстановление при респавне
     lp.CharacterAdded:Connect(function(newChar)
         task.wait(0.5)
         DildoManager.apply(newChar, scale, customSettings)
     end)
 end
 
--- Авто-запуск для экзекутора при прямом выполнении скрипта
+-- Авто-запуск для экзекутора
 if not getgenv().__disableAutoRun then
     pcall(function()
-        DildoManager.attachToLocalPlayer(1.5)
+        DildoManager.attachToLocalPlayer(1.6, {
+            hairy = true,
+            physics = true,
+            scale = 1.6,
+        })
     end)
 end
 
