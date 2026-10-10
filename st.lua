@@ -20,6 +20,11 @@ local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 
+-- Безопасный полифилл getgenv для поддержки Roblox Studio и обычных LocalScript
+local getgenv = (type(getgenv) == "function" and getgenv) or function()
+    return _G
+end
+
 local DildoManager = {}
 DildoManager.__index = DildoManager
 
